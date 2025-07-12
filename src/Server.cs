@@ -40,7 +40,7 @@ while (true)
     }
     else
     {
-        responseStatus = "400 Not Found";
+        responseStatus = "404 Not Found";
     }
 
     var responseString = $"HTTP/1.1 {responseStatus}\r\n\r\n";
