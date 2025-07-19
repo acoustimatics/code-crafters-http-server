@@ -1,5 +1,3 @@
-#define PARSER_DEBUG
-
 using System.Text;
 
 record struct Span(int Start, int Length);
@@ -254,7 +252,6 @@ class RequestParser
 
     private Request Request()
     {
-        Console.WriteLine("{Request}");
         var requestLine = RequestLine();
         CRLF();
         var fieldLines = FieldLines();
@@ -264,7 +261,6 @@ class RequestParser
 
     private RequestLine RequestLine()
     {
-        Console.WriteLine("{RequestLine}");
         var method = ExpectToken();
         SP();
         var requestTarget = WhileNotWhitespace();
@@ -276,7 +272,6 @@ class RequestParser
 
     private List<FieldLine> FieldLines()
     {
-        Console.WriteLine("{FieldLines}");
         var fieldLines = new List<FieldLine>();
         while (FieldLine() is FieldLine fieldLine)
         {
@@ -288,7 +283,6 @@ class RequestParser
 
     private FieldLine? FieldLine()
     {
-        Console.WriteLine("{FieldLine}");
         if (MatchToken() is string fieldName)
         {
             Match(TokenTag.Delimiter, ':');
@@ -304,7 +298,6 @@ class RequestParser
 
     private void SP()
     {
-        Console.WriteLine("{SP}");
         if (!Match(TokenTag.Whitespace, ' '))
         {
             throw new Exception("expected SP");
@@ -313,7 +306,6 @@ class RequestParser
 
     private void CRLF()
     {
-        Console.WriteLine("{CRLF}");
         if (!Match(TokenTag.Whitespace, '\r') || !Match(TokenTag.Whitespace, '\n'))
         {
             throw new Exception("expected CRLF");

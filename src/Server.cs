@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -5,7 +6,7 @@ using System.Text.RegularExpressions;
 
 class Program
 {
-    public static void Main(string[] args)
+    public static async Task Main(string[] args)
     {
         var requestHandlers = new Func<Request, string?>[]
         {
@@ -17,14 +18,40 @@ class Program
         using var server = new TcpListener(IPAddress.Any, 4221);
         server.Start();
 
+        var acceptTask = server.AcceptSocketAsync();
+
+        var connectionTasks = new List<Task>();
+
         while (true)
         {
-            using var socket = server.AcceptSocket();
+            if (acceptTask.IsCompleted)
+            {
+                var socket = acceptTask.Result;
+                acceptTask = server.AcceptSocketAsync();
+                Log("accepted connection");
 
-            var requestText = ReadRequestText(socket);
+                var task = HandleConnection(socket, requestHandlers);
+                connectionTasks.Add(task);
+            }
+
+            for (var i = connectionTasks.Count - 1; i >= 0; i--)
+            {
+                if (connectionTasks[i].IsCompleted)
+                {
+                    connectionTasks.RemoveAt(i);
+                }
+            }
+        }
+    }
+
+    static async Task HandleConnection(Socket socket, Func<Request, string?>[] requestHandlers)
+    {
+        try
+        {
+            var requestText = await ReadRequestText(socket);
             var request = RequestParser.Parse(requestText);
 
-            Console.WriteLine(request);
+            Log("request target: ", request.RequestLine.RequestTarget);
 
             string? response = null;
             foreach (var requestHandler in requestHandlers)
@@ -32,36 +59,42 @@ class Program
                 response = requestHandler(request);
                 if (response != null)
                 {
-                    Send(socket, response);
+                    await Send(socket, response);
                     break;
                 }
             }
 
             if (response == null)
             {
-                Send(socket, $"HTTP/1.1 404 Not Found\r\n\r\n");
+                await Send(socket, $"HTTP/1.1 404 Not Found\r\n\r\n");
             }
-        }
-    }
 
-    static string ReadRequestText(Socket socket)
-    {
-        var buffer = new byte[64];
-        var requestText = new StringBuilder();
-        do
+            Log("responded to: ", request.RequestLine.RequestTarget);
+        }
+        finally
         {
-            var bytesReceived = socket.Receive(buffer);
-            var textReceived = Encoding.ASCII.GetString(buffer, index: 0, count: bytesReceived);
-            requestText.Append(textReceived);
+            socket.Dispose();
         }
-        while (socket.Available > 0);
-        return requestText.ToString();
     }
 
-    static void Send(Socket socket, string response)
+    static async Task<string> ReadRequestText(Socket socket)
+        {
+            var buffer = new byte[64];
+            var requestText = new StringBuilder();
+            do
+            {
+                var bytesReceived = await socket.ReceiveAsync(buffer);
+                var textReceived = Encoding.ASCII.GetString(buffer, index: 0, count: bytesReceived);
+                requestText.Append(textReceived);
+            }
+            while (socket.Available > 0);
+            return requestText.ToString();
+        }
+
+    static async Task Send(Socket socket, string response)
     {
         var responseBytes = Encoding.ASCII.GetBytes(response);
-        socket.Send(responseBytes);
+        await socket.SendAsync(responseBytes);
     }
 
     static string? RequestDefault(Request request)
@@ -140,5 +173,16 @@ class Program
         response.Append(body);
 
         return response.ToString();
+    }
+
+    static void Log(string message)
+    {
+        Console.WriteLine(message);
+    }
+
+    static void Log(string message, string context)
+    {
+        Console.Write(message);
+        Console.WriteLine(context);
     }
 }
