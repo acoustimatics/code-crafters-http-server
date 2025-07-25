@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -6,13 +5,17 @@ using System.Text.RegularExpressions;
 
 class Program
 {
-    public static async Task Main(string[] args)
+    public static Task Main(string[] args)
     {
-        var requestHandlers = new Func<Request, string?>[]
+        CommandLine.Parse(args);
+        Log("directory: ", Options.Instance.Directory ?? "<NONE>");
+
+        var requestHandlers = new Func<Request, Socket, Task<bool>>[]
         {
             RequestDefault,
             RequestEcho,
             RequestAgent,
+            RequestFiles,
         };
 
         using var server = new TcpListener(IPAddress.Any, 4221);
@@ -44,7 +47,7 @@ class Program
         }
     }
 
-    static async Task HandleConnection(Socket socket, Func<Request, string?>[] requestHandlers)
+    static async Task HandleConnection(Socket socket, Func<Request, Socket, Task<bool>>[] requestHandlers)
     {
         try
         {
@@ -56,10 +59,8 @@ class Program
             string? response = null;
             foreach (var requestHandler in requestHandlers)
             {
-                response = requestHandler(request);
-                if (response != null)
+                if (await requestHandler(request, socket))
                 {
-                    await Send(socket, response);
                     break;
                 }
             }
@@ -78,18 +79,18 @@ class Program
     }
 
     static async Task<string> ReadRequestText(Socket socket)
+    {
+        var buffer = new byte[64];
+        var requestText = new StringBuilder();
+        do
         {
-            var buffer = new byte[64];
-            var requestText = new StringBuilder();
-            do
-            {
-                var bytesReceived = await socket.ReceiveAsync(buffer);
-                var textReceived = Encoding.ASCII.GetString(buffer, index: 0, count: bytesReceived);
-                requestText.Append(textReceived);
-            }
-            while (socket.Available > 0);
-            return requestText.ToString();
+            var bytesReceived = await socket.ReceiveAsync(buffer);
+            var textReceived = Encoding.ASCII.GetString(buffer, index: 0, count: bytesReceived);
+            requestText.Append(textReceived);
         }
+        while (socket.Available > 0);
+        return requestText.ToString();
+    }
 
     static async Task Send(Socket socket, string response)
     {
@@ -97,55 +98,109 @@ class Program
         await socket.SendAsync(responseBytes);
     }
 
-    static string? RequestDefault(Request request)
+    static async Task WriteAscii(Socket socket, string str)
+    {
+        var bytes = Encoding.ASCII.GetBytes(str);
+        await socket.SendAsync(bytes);
+    }
+
+    static async Task<bool> RequestDefault(Request request, Socket socket)
     {
         var regex = new Regex("^/$");
         var match = regex.Match(request.RequestLine.RequestTarget);
         if (!match.Success)
         {
-            return null;
+            return false;
         }
-        return $"HTTP/1.1 200 OK\r\n\r\n";
+        await WriteAscii(socket, "HTTP/1.1 200 OK\r\n\r\n");
+        return true;
     }
 
-    static string? RequestEcho(Request request)
+    static async Task<bool> RequestEcho(Request request, Socket socket)
     {
         var regex = new Regex("^/echo/(?<str>[^/]+)$");
         var match = regex.Match(request.RequestLine.RequestTarget);
         if (!match.Success)
         {
-            return null;
+            return false;
         }
 
         var str = match.Groups["str"]?.Value;
         if (str == null)
         {
-            return null;
+            return false;
         }
 
-        var response = new StringBuilder();
 
-        response.Append("HTTP/1.1 200 OK\r\n");
+        await WriteAscii(socket, "HTTP/1.1 200 OK\r\n");
 
-        response.Append("Content-Type: text/plain\r\n");
+        await WriteAscii(socket, "Content-Type: text/plain\r\n");
 
         var contentLength = Encoding.ASCII.GetByteCount(str);
-        response.Append("Content-Length: ").Append(contentLength).Append("\r\n");
+        await WriteAscii(socket, $"Content-Length: {contentLength}\r\n");
 
-        response.Append("\r\n");
+        await WriteAscii(socket, "\r\n");
 
-        response.Append(str);
+        await WriteAscii(socket, str);
 
-        return response.ToString();
+        return true;
     }
 
-    static string? RequestAgent(Request request)
+    static async Task<bool> RequestFiles(Request request, Socket socket)
+    {
+        var regex = new Regex("^/files/(?<filename>[^/]+)$");
+        var match = regex.Match(request.RequestLine.RequestTarget);
+        if (!match.Success)
+        {
+            return false;
+        }
+        Log("Request for file");
+        
+        var directory = Options.Instance.Directory;
+        if (string.IsNullOrEmpty(directory))
+        {
+            Log("Directory not set.");
+            return false;
+        }
+
+        var filename = match.Groups["filename"]?.Value;
+        if (filename == null)
+        {
+            return false;
+        }
+
+        var path = Path.Combine(directory, filename);
+        Log("Requesting file: ", path);
+
+        byte[] fileContent;
+        try
+        {
+            fileContent = File.ReadAllBytes(path);
+        }
+        catch (Exception ex)
+        {
+            Log("exception: ", ex.Message);
+            return false;
+        }
+
+        Log("Sending file: ", filename);
+        
+        await WriteAscii(socket, "HTTP/1.1 200 OK\r\n");
+        await WriteAscii(socket ,"Content-Type: application/octet-stream\r\n");
+        await WriteAscii(socket, $"Content-Length: {fileContent.Length}\r\n");
+        await WriteAscii(socket ,"\r\n");
+        await socket.SendAsync(fileContent);
+
+        return false;
+    }
+
+    static async Task<bool> RequestAgent(Request request, Socket socket)
     {
         var regex = new Regex("^/user-agent$");
         var match = regex.Match(request.RequestLine.RequestTarget);
         if (!match.Success)
         {
-            return null;
+            return false;
         }
 
         var body = "";
@@ -159,20 +214,14 @@ class Program
             }
         }
 
-        var response = new StringBuilder();
-
-        response.Append("HTTP/1.1 200 OK\r\n");
-
-        response.Append("Content-Type: text/plain\r\n");
-
+        await WriteAscii(socket, "HTTP/1.1 200 OK\r\n");
+        await WriteAscii(socket, "Content-Type: text/plain\r\n");
         var contentLength = Encoding.ASCII.GetByteCount(body);
-        response.Append("Content-Length: ").Append(contentLength).Append("\r\n");
+        await WriteAscii(socket, $"Content-Length: {contentLength}\r\n");
+        await WriteAscii(socket, "\r\n");
+        await WriteAscii(socket, body);
 
-        response.Append("\r\n");
-
-        response.Append(body);
-
-        return response.ToString();
+        return true;
     }
 
     static void Log(string message)
