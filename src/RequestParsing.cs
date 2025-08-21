@@ -13,7 +13,8 @@ record FieldLine(
 
 record Request(
     RequestLine RequestLine,
-    List<FieldLine> FieldLines);
+    List<FieldLine> FieldLines,
+    string Body);
 
 enum TokenTag
 {
@@ -256,7 +257,8 @@ class RequestParser
         CRLF();
         var fieldLines = FieldLines();
         CRLF();
-        return new Request(requestLine, fieldLines);
+        var body = Body();
+        return new Request(requestLine, fieldLines, body);
     }
 
     private RequestLine RequestLine()
@@ -294,6 +296,20 @@ class RequestParser
         }
 
         return null;
+    }
+
+    private string Body()
+    {
+        var body = new StringBuilder();
+        while (current.Tag != TokenTag.EndOfText)
+        {
+            body.Append(
+                requestText.AsSpan().Slice(
+                    current.SpanLexeme.Start,
+                    current.SpanLexeme.Length));
+            Advance();
+        }
+        return body.ToString();
     }
 
     private void SP()

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -16,6 +17,7 @@ class Program
             RequestEcho,
             RequestAgent,
             RequestFiles,
+            RequestFilesPost,
         };
 
         using var server = new TcpListener(IPAddress.Any, 4221);
@@ -148,6 +150,11 @@ class Program
 
     static async Task<bool> RequestFiles(Request request, Socket socket)
     {
+        if (request.RequestLine.Method != "GET")
+        {
+            return false;
+        }
+
         var regex = new Regex("^/files/(?<filename>[^/]+)$");
         var match = regex.Match(request.RequestLine.RequestTarget);
         if (!match.Success)
@@ -190,6 +197,54 @@ class Program
         await WriteAscii(socket, $"Content-Length: {fileContent.Length}\r\n");
         await WriteAscii(socket ,"\r\n");
         await socket.SendAsync(fileContent);
+
+        return false;
+    }
+
+    static async Task<bool> RequestFilesPost(Request request, Socket socket)
+    {
+        if (request.RequestLine.Method != "POST")
+        {
+            return false;
+        }
+
+        var regex = new Regex("^/files/(?<filename>[^/]+)$");
+        var match = regex.Match(request.RequestLine.RequestTarget);
+        if (!match.Success)
+        {
+            return false;
+        }
+        Log("Posting a file.");
+        
+        var directory = Options.Instance.Directory;
+        if (string.IsNullOrEmpty(directory))
+        {
+            Log("Directory not set.");
+            return false;
+        }
+
+        var filename = match.Groups["filename"]?.Value;
+        if (filename == null)
+        {
+            return false;
+        }
+
+        var path = Path.Combine(directory, filename);
+        Log("Saving to file: ", path);
+
+        try
+        {
+            File.WriteAllText(path, request.Body);
+        }
+        catch (Exception ex)
+        {
+            Log("exception: ", ex.Message);
+            return false;
+        }
+
+        Log("Sending file: ", filename);
+        
+        await WriteAscii(socket, "HTTP/1.1 201 Created\r\n\r\n");
 
         return false;
     }
