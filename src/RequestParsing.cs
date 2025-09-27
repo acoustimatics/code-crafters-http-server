@@ -11,10 +11,26 @@ record FieldLine(
     string FieldName,
     string FieldValue);
 
-record Request(
-    RequestLine RequestLine,
-    List<FieldLine> FieldLines,
-    string Body);
+class Request(RequestLine requestLine, List<FieldLine> fieldLines, string body)
+{
+    public RequestLine RequestLine { get; } = requestLine;
+
+    public List<FieldLine> FieldLines { get; } = fieldLines;
+
+    public string Body { get; } = body;
+
+    public FieldLine? FindFieldLine(string fieldName)
+    {
+        foreach (var fieldLine in FieldLines)
+        {
+            if (string.Compare(fieldLine.FieldName, fieldName, ignoreCase: true) == 0)
+            {
+                return fieldLine;
+            }
+        }
+        return null;
+    }
+}
 
 enum TokenTag
 {

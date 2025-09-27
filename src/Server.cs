@@ -1,6 +1,5 @@
 using System.Net;
 using System.Net.Sockets;
-using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -11,7 +10,7 @@ class Program
         CommandLine.Parse(args);
         Log("directory: ", Options.Instance.Directory ?? "<NONE>");
 
-        var requestHandlers = new Func<Request, Socket, Task<bool>>[]
+        var requestHandlers = new Func<Request, Response?>[]
         {
             RequestDefault,
             RequestEcho,
@@ -49,7 +48,7 @@ class Program
         }
     }
 
-    static async Task HandleConnection(Socket socket, Func<Request, Socket, Task<bool>>[] requestHandlers)
+    static async Task HandleConnection(Socket socket, Func<Request, Response?>[] requestHandlers)
     {
         try
         {
@@ -58,19 +57,14 @@ class Program
 
             Log("request target: ", request.RequestLine.RequestTarget);
 
-            string? response = null;
-            foreach (var requestHandler in requestHandlers)
-            {
-                if (await requestHandler(request, socket))
-                {
-                    break;
-                }
-            }
+            var response = requestHandlers
+                .Select(requestHandler => requestHandler(request))
+                .FirstOrDefault(response => response != null)
+                ?? new Response { Status = HttpStatus.NotFound };
 
-            if (response == null)
-            {
-                await Send(socket, $"HTTP/1.1 404 Not Found\r\n\r\n");
-            }
+            ProcessCompression(request, response);
+
+            await response.RenderAsync(socket);
 
             Log("responded to: ", request.RequestLine.RequestTarget);
         }
@@ -94,72 +88,76 @@ class Program
         return requestText.ToString();
     }
 
-    static async Task Send(Socket socket, string response)
+    static void ProcessCompression(Request request, Response response)
     {
-        var responseBytes = Encoding.ASCII.GetBytes(response);
-        await socket.SendAsync(responseBytes);
+        var acceptEncodingFieldLine = request.FindFieldLine("Accept-Encoding");
+        if (acceptEncodingFieldLine == null)
+        {
+            return;
+        }
+
+        var encoding = acceptEncodingFieldLine.FieldValue;
+        if (encoding != "gzip")
+        {
+            return;
+        }
+
+        response.Headers["Content-Encoding"] = "gzip";
     }
 
-    static async Task WriteAscii(Socket socket, string str)
-    {
-        var bytes = Encoding.ASCII.GetBytes(str);
-        await socket.SendAsync(bytes);
-    }
-
-    static async Task<bool> RequestDefault(Request request, Socket socket)
+    static Response? RequestDefault(Request request)
     {
         var regex = new Regex("^/$");
         var match = regex.Match(request.RequestLine.RequestTarget);
         if (!match.Success)
         {
-            return false;
+            return null;
         }
-        await WriteAscii(socket, "HTTP/1.1 200 OK\r\n\r\n");
-        return true;
+
+        return new Response { Status = HttpStatus.Ok };
     }
 
-    static async Task<bool> RequestEcho(Request request, Socket socket)
+    static Response? RequestEcho(Request request)
     {
         var regex = new Regex("^/echo/(?<str>[^/]+)$");
         var match = regex.Match(request.RequestLine.RequestTarget);
         if (!match.Success)
         {
-            return false;
+            return null;
         }
 
         var str = match.Groups["str"]?.Value;
         if (str == null)
         {
-            return false;
+            return null;
         }
 
+        var content = Encoding.ASCII.GetBytes(str);
 
-        await WriteAscii(socket, "HTTP/1.1 200 OK\r\n");
-
-        await WriteAscii(socket, "Content-Type: text/plain\r\n");
-
-        var contentLength = Encoding.ASCII.GetByteCount(str);
-        await WriteAscii(socket, $"Content-Length: {contentLength}\r\n");
-
-        await WriteAscii(socket, "\r\n");
-
-        await WriteAscii(socket, str);
-
-        return true;
+        return new Response
+        {
+            Status = HttpStatus.Ok,
+            Headers = new Dictionary<string, string>
+            {
+                ["Content-Type"] = "text/plain",
+                ["Content-Length"] = $"{content.Length}",
+            },
+            Content = content,
+        };
     }
 
-    static async Task<bool> RequestFiles(Request request, Socket socket)
+    static Response? RequestFiles(Request request)
     {
         if (request.RequestLine.Method != "GET")
         {
-            return false;
+            return null;
         }
 
         var regex = new Regex("^/files/(?<filename>[^/]+)$");
         var match = regex.Match(request.RequestLine.RequestTarget);
         if (!match.Success)
         {
-            return false;
+            return null;
         }
         Log("Request for file");
         
@@ -167,52 +165,55 @@ class Program
         if (string.IsNullOrEmpty(directory))
         {
             Log("Directory not set.");
-            return false;
+            return null;
         }
 
         var filename = match.Groups["filename"]?.Value;
         if (filename == null)
         {
-            return false;
+            return null;
         }
 
         var path = Path.Combine(directory, filename);
         Log("Requesting file: ", path);
 
-        byte[] fileContent;
+        byte[] content;
         try
         {
-            fileContent = File.ReadAllBytes(path);
+            content = File.ReadAllBytes(path);
         }
         catch (Exception ex)
         {
             Log("exception: ", ex.Message);
-            return false;
+            return null;
         }
 
         Log("Sending file: ", filename);
         
-        await WriteAscii(socket, "HTTP/1.1 200 OK\r\n");
-        await WriteAscii(socket ,"Content-Type: application/octet-stream\r\n");
-        await WriteAscii(socket, $"Content-Length: {fileContent.Length}\r\n");
-        await WriteAscii(socket ,"\r\n");
-        await socket.SendAsync(fileContent);
-
-        return false;
+        return new Response
+        {
+            Status = HttpStatus.Ok,
+            Headers = new Dictionary<string, string>
+            {
+                ["Content-Type"] = "application/octet-stream",
+                ["Content-Length"] = $"{content.Length}",
+            },
+            Content = content,
+        };
     }
 
-    static async Task<bool> RequestFilesPost(Request request, Socket socket)
+    static Response? RequestFilesPost(Request request)
     {
         if (request.RequestLine.Method != "POST")
         {
-            return false;
+            return null;
         }
 
         var regex = new Regex("^/files/(?<filename>[^/]+)$");
         var match = regex.Match(request.RequestLine.RequestTarget);
         if (!match.Success)
         {
-            return false;
+            return null;
         }
         Log("Posting a file.");
         
@@ -220,13 +221,13 @@ class Program
         if (string.IsNullOrEmpty(directory))
         {
             Log("Directory not set.");
-            return false;
+            return null;
         }
 
         var filename = match.Groups["filename"]?.Value;
         if (filename == null)
         {
-            return false;
+            return null;
         }
 
         var path = Path.Combine(directory, filename);
@@ -239,44 +240,37 @@ class Program
         catch (Exception ex)
         {
             Log("exception: ", ex.Message);
-            return false;
+            return null;
         }
 
         Log("Sending file: ", filename);
-        
-        await WriteAscii(socket, "HTTP/1.1 201 Created\r\n\r\n");
 
-        return false;
+        return new Response { Status = HttpStatus.Created };
     }
 
-    static async Task<bool> RequestAgent(Request request, Socket socket)
+    static Response? RequestAgent(Request request)
     {
         var regex = new Regex("^/user-agent$");
         var match = regex.Match(request.RequestLine.RequestTarget);
         if (!match.Success)
         {
-            return false;
+            return null;
         }
 
-        var body = "";
+        var userAgentFieldLine = request.FindFieldLine("User-Agent");
 
-        foreach (var fieldLine in request.FieldLines)
+        var content = Encoding.ASCII.GetBytes(userAgentFieldLine?.FieldValue ?? "");
+        
+        return new Response
         {
-            if (string.Compare(fieldLine.FieldName, "User-Agent", ignoreCase: true) == 0)
+            Status = HttpStatus.Ok,
+            Headers = new Dictionary<string, string>
             {
-                body = fieldLine.FieldValue;
-                break;
-            }
-        }
-
-        await WriteAscii(socket, "HTTP/1.1 200 OK\r\n");
-        await WriteAscii(socket, "Content-Type: text/plain\r\n");
-        var contentLength = Encoding.ASCII.GetByteCount(body);
-        await WriteAscii(socket, $"Content-Length: {contentLength}\r\n");
-        await WriteAscii(socket, "\r\n");
-        await WriteAscii(socket, body);
-
-        return true;
+                ["Content-Type"] = "text/plain",
+                ["Content-Length"] = $"{content.Length}",
+            },
+            Content = content,
+        };
     }
 
     static void Log(string message)
