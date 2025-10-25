@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Text;
 
 static class Util
@@ -20,5 +21,19 @@ static class Util
         }
 
         yield return item.ToString();
+    }
+
+    public static async Task<byte[]> GzipCompress(byte[] inBytes)
+    {
+        using var outStream = new MemoryStream();
+
+        // Dispose `gzipStream` before creating array to make sure the write
+        // all data is flushed.
+        using (var gzipStream = new GZipStream(outStream, CompressionMode.Compress))
+        {
+            await gzipStream.WriteAsync(inBytes, 0, inBytes.Length);
+        }
+        
+        return outStream.ToArray();
     }
 }

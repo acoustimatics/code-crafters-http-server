@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.RegularExpressions;
+using static Util;
 
 class Program
 {
@@ -62,7 +63,7 @@ class Program
                 .FirstOrDefault(response => response != null)
                 ?? new Response { Status = HttpStatus.NotFound };
 
-            ProcessCompression(request, response);
+            await ProcessCompression(request, response);
 
             await response.RenderAsync(socket);
 
@@ -90,7 +91,7 @@ class Program
         return request;
     }
 
-    static void ProcessCompression(Request request, Response response)
+    static async Task ProcessCompression(Request request, Response response)
     {
         var acceptEncodingFieldLine = request.FindFieldLine("Accept-Encoding");
         if (acceptEncodingFieldLine == null)
@@ -106,6 +107,10 @@ class Program
             return;
         }
 
+        var content = await GzipCompress(response.Content);
+
+        response.Content = content;
+        response.Headers["Content-Length"] = content.Length.ToString();
         response.Headers["Content-Encoding"] = "gzip";
     }
 
