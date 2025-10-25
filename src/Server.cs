@@ -52,8 +52,8 @@ class Program
     {
         try
         {
-            var requestText = await ReadRequestText(socket);
-            var request = RequestParser.Parse(requestText);
+            var requestBytes = await ReadRequest(socket);
+            var request = RequestParser.Parse(requestBytes);
 
             Log("request target: ", request.RequestLine.RequestTarget);
 
@@ -74,18 +74,20 @@ class Program
         }
     }
 
-    static async Task<string> ReadRequestText(Socket socket)
+    static async Task<List<byte>> ReadRequest(Socket socket)
     {
         var buffer = new byte[64];
-        var requestText = new StringBuilder();
+        var request = new List<byte>();
         do
         {
             var bytesReceived = await socket.ReceiveAsync(buffer);
-            var textReceived = Encoding.ASCII.GetString(buffer, index: 0, count: bytesReceived);
-            requestText.Append(textReceived);
+            for (var i = 0; i < bytesReceived; i++)
+            {
+                request.Add(buffer[i]);
+            }
         }
         while (socket.Available > 0);
-        return requestText.ToString();
+        return request;
     }
 
     static void ProcessCompression(Request request, Response response)
@@ -97,7 +99,9 @@ class Program
         }
 
         var encoding = acceptEncodingFieldLine.FieldValue;
-        if (encoding != "gzip")
+        var acceptsGzip = Util.ParseCommaSeparatedList(encoding)
+            .Any(item => item.Trim() == "gzip");
+        if (!acceptsGzip)
         {
             return;
         }
@@ -235,7 +239,7 @@ class Program
 
         try
         {
-            File.WriteAllText(path, request.Body);
+            File.WriteAllBytes(path, request.Body);
         }
         catch (Exception ex)
         {

@@ -11,13 +11,13 @@ record FieldLine(
     string FieldName,
     string FieldValue);
 
-class Request(RequestLine requestLine, List<FieldLine> fieldLines, string body)
+class Request(RequestLine requestLine, List<FieldLine> fieldLines, byte[] body)
 {
     public RequestLine RequestLine { get; } = requestLine;
 
     public List<FieldLine> FieldLines { get; } = fieldLines;
 
-    public string Body { get; } = body;
+    public byte[] Body { get; } = body;
 
     public FieldLine? FindFieldLine(string fieldName)
     {
@@ -32,323 +32,198 @@ class Request(RequestLine requestLine, List<FieldLine> fieldLines, string body)
     }
 }
 
-enum TokenTag
-{
-    Delimiter,
-    EndOfText,
-    Whitespace,
-    Token,
-}
-
-readonly struct Token(TokenTag tag, Span spanLexeme)
-{
-    public TokenTag Tag { get; } = tag;
-    public Span SpanLexeme { get; } = spanLexeme;
-}
-
-class RequestScanner
-{
-    private readonly string requestText;
-    private int pos;
-    private char? ch;
-
-    public RequestScanner(string requestText)
-    {
-        this.requestText = requestText;
-        pos = -1;
-        ch = null;
-
-        Advance();
-    }
-
-    private bool IsTokenChar(char c)
-    {
-        return char.IsAsciiLetterOrDigit(c) ||
-            c == '!' ||
-            c == '#' ||
-            c == '$' ||
-            c == '%' ||
-            c == '&' ||
-            c == '\'' ||
-            c == '*' ||
-            c == '+' ||
-            c == '-' ||
-            c == '.' ||
-            c == '^' ||
-            c == '_' ||
-            c == '`' ||
-            c == '|' ||
-            c == '~';
-    }
-
-    private bool IsWhitespace(char c)
-    {
-        return c == ' ' || c == '\t' || c == '\r' || c == '\n';
-    }
-
-    private bool IsDelimiter(char c)
-    {
-        return c == ':' || c == '?' || c == '/';
-    }
-
-    private void Advance()
-    {
-#if PARSER_DEBUG
-        if (pos >= 0) {
-            switch (ch)
-            {
-                case null:
-                    Console.WriteLine($"[{pos}: NULL]");
-                    break;
-
-                case ' ':
-                    Console.WriteLine($"[{pos}: SP]");
-                    break;
-
-                case '\r':
-                    Console.WriteLine($"[{pos}: CR]");
-                    break;
-
-                case '\n':
-                    Console.WriteLine($"[{pos}: LF]");
-                    break;
-
-                case '\t':
-                    Console.WriteLine($"[{pos}: HT]");
-                    break;
-
-                case char c:
-                    Console.WriteLine($"[{pos}: `{c}`]");
-                    break;
-            }
-        }
-#endif
-
-        pos++;
-        if (pos < requestText.Length)
-        {
-            ch = requestText[pos];
-        }
-        else
-        {
-            ch = null;
-        }
-    }
-
-    private Token AcceptCharacter(TokenTag tag)
-    {
-        var token = new Token(tag, new Span(pos, 1));
-        Advance();
-        return token;
-    }
-
-    private Token AcceptToken()
-    {
-        var start = pos;
-        while (ch != null && IsTokenChar(ch.Value))
-        {
-            Advance();
-        }
-        return new Token(TokenTag.Token, new Span(start, pos - start));
-    }
-
-    public Token NextToken()
-    {
-        switch (ch)
-        {
-            case null:
-                return new Token(TokenTag.EndOfText, new Span(0, 0));
-
-            case char c when IsWhitespace(c):
-                return AcceptCharacter(TokenTag.Whitespace);
-                
-            case char c when IsDelimiter(c):
-                return AcceptCharacter(TokenTag.Delimiter);
-
-            case char c when IsTokenChar(c):
-                return AcceptToken();
-
-            case char c:
-                throw new Exception($"unexpected character `{c}`");
-        }
-    }
-}
+enum LWSTag { Normal, Continuation }
 
 class RequestParser
 {
-    private readonly string requestText;
-    private readonly RequestScanner scanner;
-    private Token current;
+    private const byte CR = 13;
+    private const byte LF = 10;
+    private const byte SP = 32;
+    private const byte HT = 9;
 
-    private RequestParser(string requestText)
+    private readonly List<byte> request;
+    private int index;
+    private byte?[] octet = new byte?[3];
+
+    private RequestParser(List<byte> request)
     {
-        this.requestText = requestText;
-        scanner = new RequestScanner(requestText);
+        this.request = request;
+        index = -1;
+        Advance();
+        Advance();
         Advance();
     }
 
-    private void Advance()
+    public static Request Parse(List<byte> request)
     {
-        current = scanner.NextToken();
-
-#if PARSER_DEBUG
-        if (current.Tag == TokenTag.Token)
-        {
-            var lexeme = requestText.Substring(current.SpanLexeme.Start, current.SpanLexeme.Length);
-            Console.WriteLine($"<{current.Tag}: `{lexeme}`>");
-        }
-        else
-        {
-            Console.WriteLine($"<{current.Tag}>");
-        }
-#endif
-    }
-
-    private void Expect(TokenTag tag)
-    {
-        if (current.Tag != tag)
-        {
-            throw new Exception($"expected {tag} but got {current.Tag}");
-        }
-
-        Advance();
-    }
-
-    private bool Match(TokenTag tag, char c)
-    {
-        var isMatch = current.Tag == tag && requestText[current.SpanLexeme.Start] == c;
-        if (isMatch)
-        {
-            Advance();
-        }
-        return isMatch;
-    }
-
-    private string? MatchToken()
-    {
-        if (current.Tag != TokenTag.Token)
-        {
-            return null;
-        }
-
-        var word = requestText.Substring(current.SpanLexeme.Start, current.SpanLexeme.Length);
-        Advance();
-        return word;
-    }
-
-    private string ExpectToken()
-    {
-        if (MatchToken() is string token)
-        {
-            return token;
-        }
-
-        throw new Exception($"expected Token but got {current.Tag}");
-    }
-
-    private string WhileNotWhitespace()
-    {
-        var str = new StringBuilder();
-        while (current.Tag != TokenTag.Whitespace)
-        {
-            str.Append(
-                requestText.AsSpan().Slice(
-                    current.SpanLexeme.Start,
-                    current.SpanLexeme.Length));
-
-            Advance();
-        }
-        return str.ToString();
-    }
-
-    public static Request Parse(string requestText)
-    {
-        var parser = new RequestParser(requestText);
+        var parser = new RequestParser(request);
         return parser.Request();
     }
 
     private Request Request()
     {
         var requestLine = RequestLine();
-        CRLF();
         var fieldLines = FieldLines();
-        CRLF();
         var body = Body();
         return new Request(requestLine, fieldLines, body);
     }
 
     private RequestLine RequestLine()
     {
-        var method = ExpectToken();
-        SP();
-        var requestTarget = WhileNotWhitespace();
-        SP();
-        var httpVersion = WhileNotWhitespace();
-        
-        return new RequestLine(method, requestTarget, httpVersion);
+        var method = new List<Byte>();
+        while (octet[0] is byte o && o != SP)
+        {
+            method.Add(o);
+            Advance();
+        }
+
+        Expect(SP);
+
+        var requestURI = new List<byte>();
+        while (octet[0] is byte o && o != SP)
+        {
+            requestURI.Add(o);
+            Advance();
+        }
+
+        Expect(SP);
+
+        var httpVersion = new List<byte>();
+        while (octet[0] is byte o && (octet[0] != CR || octet[1] != LF))
+        {
+            httpVersion.Add(o);
+            Advance();
+        }
+
+        Expect(CR);
+        Expect(LF);
+
+        return new RequestLine(GetString(method), GetString(requestURI), GetString(httpVersion));
     }
 
     private List<FieldLine> FieldLines()
     {
         var fieldLines = new List<FieldLine>();
-        while (FieldLine() is FieldLine fieldLine)
+
+        while (octet[0] is byte && !IsCRLF(octet[0], octet[1]))
         {
+            var fieldName = ExpectToken();
+
+            Expect(':');
+
+            var fieldValue = new List<byte>();
+            while (octet[0] is byte o && !IsCRLF(octet[0], octet[1]))
+            {
+                fieldValue.Add(o);
+                Advance();
+            }
+            Expect(CR);
+            Expect(LF);
+
+            var fieldLine = new FieldLine(GetString(fieldName), GetString(fieldValue).Trim());
             fieldLines.Add(fieldLine);
-            CRLF();
         }
+
+        Expect(CR);
+        Expect(LF);
+
         return fieldLines;
     }
 
-    private FieldLine? FieldLine()
+    private byte[] Body()
     {
-        if (MatchToken() is string fieldName)
+        var body = new List<byte>();
+        while (octet[0] is byte o)
         {
-            Match(TokenTag.Delimiter, ':');
-            OWS();
-            var fieldValue = WhileNotWhitespace();
-            OWS();
-
-            return new FieldLine(fieldName, fieldValue);
-        }
-
-        return null;
-    }
-
-    private string Body()
-    {
-        var body = new StringBuilder();
-        while (current.Tag != TokenTag.EndOfText)
-        {
-            body.Append(
-                requestText.AsSpan().Slice(
-                    current.SpanLexeme.Start,
-                    current.SpanLexeme.Length));
+            body.Add(o);
             Advance();
         }
-        return body.ToString();
+        return body.ToArray();
     }
 
-    private void SP()
+    private void Expect(byte o)
     {
-        if (!Match(TokenTag.Whitespace, ' '))
+        if (octet[0] == o)
         {
-            throw new Exception("expected SP");
+            Advance();
+        }
+        else
+        {
+            throw new Exception($"unexpected octet {octet[0]}, expected {o}");
         }
     }
 
-    private void CRLF()
+    private void Expect(char c)
     {
-        if (!Match(TokenTag.Whitespace, '\r') || !Match(TokenTag.Whitespace, '\n'))
+        Expect((byte)c);
+    }
+
+    private List<byte> ExpectToken()
+    {
+        if (octet[0] is byte o && IsToken(o))
         {
-            throw new Exception("expected CRLF");
+            return Token();
+        }
+        else
+        {
+            throw new Exception($"expected token but found {octet[0]}");
         }
     }
 
-    private void OWS()
+    private List<byte> Token()
     {
-        while (Match(TokenTag.Whitespace, ' ') || Match(TokenTag.Whitespace, '\t'))
+        var token = new List<byte>();
+        while (octet[0] is byte o && IsToken(o))
         {
+            token.Add(o);
+            Advance();
         }
+        return token;
+    }
+
+    /// <summary>
+    /// Advance once octet in the request.
+    /// </summary>
+    private void Advance()
+    {
+        index++;
+        octet[0] = octet[1];
+        octet[1] = octet[2];
+        octet[2] = index < request.Count ? request[index] : null;
+    }
+
+    /// <summary>
+    /// Whether `o` can be in a TOKEN.
+    /// </summary>
+    private static bool IsToken(byte o)
+    {
+        return !IsCTL(o) && !IsSeparator(o);
+    }
+
+    /// <summary>
+    /// Whether `o` is a control character (0 - 31) or DEL (127).
+    /// </summary>
+    private static bool IsCTL(byte? o)
+    {
+        return 0 <= o && o <= 31 || o == 127;
+    }
+
+    private static bool IsSeparator(byte? o)
+    {
+        return o == '(' || o == ')' || o == '<' || o == '>' || o == '@'
+            || o == ',' || o == ';' || o == ':' || o == '\\' || o == '"'
+            || o == '/' || o == '[' || o == ']' || o == '?' || o == '='
+            || o == '{' || o == '}' || o == SP || o == HT;
+    }
+
+    private static bool IsCRLF(byte? o0, byte? o1)
+    {
+        return o0 == CR && o1 == LF;
+    }
+
+    private static string GetString(List<byte> octets)
+    {
+        var bytes = octets.ToArray();
+        return Encoding.ASCII.GetString(bytes, 0, bytes.Length);
     }
 }
-
