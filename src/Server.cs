@@ -6,7 +6,7 @@ using static Util;
 
 class Program
 {
-    public static Task Main(string[] args)
+    public static async Task Main(string[] args)
     {
         CommandLine.Parse(args);
         Log("directory: ", Options.Instance.Directory ?? "<NONE>");
@@ -23,29 +23,26 @@ class Program
         using var server = new TcpListener(IPAddress.Any, 4221);
         server.Start();
 
-        var acceptTask = server.AcceptSocketAsync();
-
-        var connectionTasks = new List<Task>();
+        var connectionCounter = 0;
 
         while (true)
         {
-            if (acceptTask.IsCompleted)
-            {
-                var socket = acceptTask.Result;
-                acceptTask = server.AcceptSocketAsync();
-                Log("accepted connection");
+            Log("waiting for connections");
+            var socket = await server.AcceptSocketAsync();
 
-                var task = HandleConnection(socket, requestHandlers);
-                connectionTasks.Add(task);
-            }
+            var connectionNumber = connectionCounter++;
+            Log($"accepted connection #{connectionNumber}");
 
-            for (var i = connectionTasks.Count - 1; i >= 0; i--)
-            {
-                if (connectionTasks[i].IsCompleted)
+            _ = HandleConnection(socket, requestHandlers).ContinueWith(task => {
+                if (task.IsFaulted)
                 {
-                    connectionTasks.RemoveAt(i);
+                    Log($"connection #{connectionNumber} faulted with: {task.Exception.Message}");
                 }
-            }
+                else
+                {
+                    Log($"finished connection #{connectionNumber}");
+                }
+            });
         }
     }
 
