@@ -1,4 +1,6 @@
+using System.Net.Sockets;
 using System.Text;
+using static Util;
 
 record struct Span(int Start, int Length);
 
@@ -7,145 +9,146 @@ record RequestLine(
     string RequestTarget,
     string HttpVersion);
 
-record FieldLine(
-    string FieldName,
-    string FieldValue);
-
-class Request(RequestLine requestLine, List<FieldLine> fieldLines, byte[] body)
+class Request(RequestLine requestLine, Dictionary<string, string> fieldLines, byte[] body)
 {
     public RequestLine RequestLine { get; } = requestLine;
 
-    public List<FieldLine> FieldLines { get; } = fieldLines;
+    public Dictionary<string, string> FieldLines { get; } = fieldLines;
 
     public byte[] Body { get; } = body;
 
-    public FieldLine? FindFieldLine(string fieldName)
+    public string? GetFieldLineValue(string fieldName)
     {
-        foreach (var fieldLine in FieldLines)
+        if (FieldLines.TryGetValue(fieldName, out var fieldValue))
         {
-            if (string.Compare(fieldLine.FieldName, fieldName, ignoreCase: true) == 0)
-            {
-                return fieldLine;
-            }
+            return fieldValue;
         }
+
         return null;
     }
 }
 
 enum LWSTag { Normal, Continuation }
 
-class RequestParser
+class RequestParser : IDisposable
 {
     private const byte CR = 13;
     private const byte LF = 10;
     private const byte SP = 32;
     private const byte HT = 9;
 
-    private readonly List<byte> request;
-    private int index;
+    private readonly Socket socket;
+    private readonly byte[] buffer = new byte[64];
+    private int size = 0;
+    private bool isMoreToRead = false;
+    private int index = -1;
     private byte?[] octet = new byte?[3];
 
-    private RequestParser(List<byte> request)
+    public RequestParser(Socket socket)
     {
-        this.request = request;
-        index = -1;
-        Advance();
-        Advance();
-        Advance();
+        this.socket = socket;
     }
 
-    public static Request Parse(List<byte> request)
+    public async Task<Request> ParseRequest()
     {
-        var parser = new RequestParser(request);
-        return parser.Request();
-    }
+        if (!isMoreToRead)
+        {
+            isMoreToRead = true;
+            size = 0;
+            index = -1;
+            await Advance();
+            await Advance();
+            await Advance();
+        }
 
-    private Request Request()
-    {
-        var requestLine = RequestLine();
-        var fieldLines = FieldLines();
-        var body = Body();
+        var requestLine = await RequestLine();
+        var fieldLines = await FieldLines();
+        var contentLenth = GetValueAsInt(fieldLines, "Content-Length") ?? 0;
+        var body = await Body(contentLenth);
         return new Request(requestLine, fieldLines, body);
     }
 
-    private RequestLine RequestLine()
+    private async Task<RequestLine> RequestLine()
     {
         var method = new List<Byte>();
         while (octet[0] is byte o && o != SP)
         {
             method.Add(o);
-            Advance();
+            await Advance();
         }
 
-        Expect(SP);
+        await Expect(SP);
 
         var requestURI = new List<byte>();
         while (octet[0] is byte o && o != SP)
         {
             requestURI.Add(o);
-            Advance();
+            await Advance();
         }
 
-        Expect(SP);
+        await Expect(SP);
 
         var httpVersion = new List<byte>();
         while (octet[0] is byte o && (octet[0] != CR || octet[1] != LF))
         {
             httpVersion.Add(o);
-            Advance();
+            await Advance();
         }
 
-        Expect(CR);
-        Expect(LF);
+        await Expect(CR);
+        await Expect(LF);
 
         return new RequestLine(GetString(method), GetString(requestURI), GetString(httpVersion));
     }
 
-    private List<FieldLine> FieldLines()
+    private async Task<Dictionary<string, string>> FieldLines()
     {
-        var fieldLines = new List<FieldLine>();
+        // Using an explicit comparer b/c header names are case insensitive.
+        var fieldLines = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         while (octet[0] is byte && !IsCRLF(octet[0], octet[1]))
         {
-            var fieldName = ExpectToken();
+            var fieldName = await ExpectToken();
 
-            Expect(':');
+            await Expect(':');
 
             var fieldValue = new List<byte>();
             while (octet[0] is byte o && !IsCRLF(octet[0], octet[1]))
             {
                 fieldValue.Add(o);
-                Advance();
+                await Advance();
             }
-            Expect(CR);
-            Expect(LF);
+            await Expect(CR);
+            await Expect(LF);
 
-            var fieldLine = new FieldLine(GetString(fieldName), GetString(fieldValue).Trim());
-            fieldLines.Add(fieldLine);
+            var fieldNameString = GetString(fieldName);
+            var fieldValueString = GetString(fieldValue).Trim();
+
+            fieldLines[fieldNameString] = fieldValueString;
         }
 
-        Expect(CR);
-        Expect(LF);
+        await Expect(CR);
+        await Expect(LF);
 
         return fieldLines;
     }
 
-    private byte[] Body()
+    private async Task<byte[]> Body(int contentLength)
     {
-        var body = new List<byte>();
-        while (octet[0] is byte o)
+        var body = new byte[contentLength];
+        for (var i = 0; i < contentLength && octet[0] is byte o; i++)
         {
-            body.Add(o);
-            Advance();
+            body[i] = o;
+            await Advance();
         }
-        return body.ToArray();
+        return body;
     }
 
-    private void Expect(byte o)
+    private async Task Expect(byte o)
     {
         if (octet[0] == o)
         {
-            Advance();
+            await Advance();
         }
         else
         {
@@ -153,16 +156,16 @@ class RequestParser
         }
     }
 
-    private void Expect(char c)
+    private async Task Expect(char c)
     {
-        Expect((byte)c);
+        await Expect((byte)c);
     }
 
-    private List<byte> ExpectToken()
+    private async Task<List<byte>> ExpectToken()
     {
         if (octet[0] is byte o && IsToken(o))
         {
-            return Token();
+            return await Token();
         }
         else
         {
@@ -170,13 +173,13 @@ class RequestParser
         }
     }
 
-    private List<byte> Token()
+    private async Task<List<byte>> Token()
     {
         var token = new List<byte>();
         while (octet[0] is byte o && IsToken(o))
         {
             token.Add(o);
-            Advance();
+            await Advance();
         }
         return token;
     }
@@ -184,12 +187,20 @@ class RequestParser
     /// <summary>
     /// Advance once octet in the request.
     /// </summary>
-    private void Advance()
+    private async Task Advance()
     {
         index++;
+
+        if (index >= size && isMoreToRead)
+        {
+            index = 0;
+            size = await socket.ReceiveAsync(buffer);
+            isMoreToRead = socket.Available > 0;
+        }
+
         octet[0] = octet[1];
         octet[1] = octet[2];
-        octet[2] = index < request.Count ? request[index] : null;
+        octet[2] = index < size ? buffer[index] : null;
     }
 
     /// <summary>
@@ -225,5 +236,10 @@ class RequestParser
     {
         var bytes = octets.ToArray();
         return Encoding.ASCII.GetString(bytes, 0, bytes.Length);
+    }
+
+    public void Dispose()
+    {
+        socket?.Dispose();
     }
 }

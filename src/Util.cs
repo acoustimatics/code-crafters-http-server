@@ -33,7 +33,20 @@ static class Util
         {
             await gzipStream.WriteAsync(inBytes, 0, inBytes.Length);
         }
-        
+
         return outStream.ToArray();
+    }
+
+    public static int? GetValueAsInt(Dictionary<string, string> dict, string key)
+    {
+        if (dict.TryGetValue(key, out var value))
+        {
+            if (int.TryParse(value, out var intValue))
+            {
+                return intValue;
+            }
+        }
+
+        return null;
     }
 }

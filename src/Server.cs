@@ -48,10 +48,11 @@ class Program
 
     static async Task HandleConnection(Socket socket, Func<Request, Response?>[] requestHandlers)
     {
-        try
+        using var parser = new RequestParser(socket);
+
+        while (true)
         {
-            var requestBytes = await ReadRequest(socket);
-            var request = RequestParser.Parse(requestBytes);
+            var request = await parser.ParseRequest();
 
             Log("request target: ", request.RequestLine.RequestTarget);
 
@@ -65,10 +66,6 @@ class Program
             await response.RenderAsync(socket);
 
             Log("responded to: ", request.RequestLine.RequestTarget);
-        }
-        finally
-        {
-            socket.Dispose();
         }
     }
 
@@ -90,14 +87,13 @@ class Program
 
     static async Task ProcessCompression(Request request, Response response)
     {
-        var acceptEncodingFieldLine = request.FindFieldLine("Accept-Encoding");
-        if (acceptEncodingFieldLine == null)
+        var acceptEncoding = request.GetFieldLineValue("Accept-Encoding");
+        if (acceptEncoding == null)
         {
             return;
         }
 
-        var encoding = acceptEncodingFieldLine.FieldValue;
-        var acceptsGzip = Util.ParseCommaSeparatedList(encoding)
+        var acceptsGzip = ParseCommaSeparatedList(acceptEncoding)
             .Any(item => item.Trim() == "gzip");
         if (!acceptsGzip)
         {
@@ -263,9 +259,9 @@ class Program
             return null;
         }
 
-        var userAgentFieldLine = request.FindFieldLine("User-Agent");
+        var userAgent = request.GetFieldLineValue("User-Agent");
 
-        var content = Encoding.ASCII.GetBytes(userAgentFieldLine?.FieldValue ?? "");
+        var content = Encoding.ASCII.GetBytes(userAgent ?? "");
         
         return new Response
         {
