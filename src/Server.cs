@@ -31,41 +31,48 @@ class Program
             var socket = await server.AcceptSocketAsync();
 
             var connectionNumber = connectionCounter++;
-            Log($"accepted connection #{connectionNumber}");
+            Log($"[connection #{connectionNumber}] accepted");
 
-            _ = HandleConnection(socket, requestHandlers).ContinueWith(task => {
+            _ = HandleConnection(socket, connectionNumber, requestHandlers).ContinueWith(task => {
                 if (task.IsFaulted)
                 {
-                    Log($"connection #{connectionNumber} faulted with: {task.Exception.Message}");
+                    Log($"[connection #{connectionNumber}] faulted with: {task.Exception.Message}");
                 }
                 else
                 {
-                    Log($"finished connection #{connectionNumber}");
+                    Log($"[connection #{connectionNumber}] finished");
                 }
             });
         }
     }
 
-    static async Task HandleConnection(Socket socket, Func<Request, Response?>[] requestHandlers)
+    static async Task HandleConnection(
+        Socket socket,
+        int connectionNumber,
+        Func<Request, Response?>[] requestHandlers)
     {
         using var parser = new RequestParser(socket);
 
-        while (true)
+        var closeConnection = false;
+
+        while (!closeConnection)
         {
             var request = await parser.ParseRequest();
 
-            Log("request target: ", request.RequestLine.RequestTarget);
+            Log($"[connection #{connectionNumber}] request target: ", request.RequestLine.RequestTarget);
 
             var response = requestHandlers
                 .Select(requestHandler => requestHandler(request))
                 .FirstOrDefault(response => response != null)
                 ?? new Response { Status = HttpStatus.NotFound };
 
+            closeConnection = ProcessConnection(request, response);
             await ProcessCompression(request, response);
 
             await response.RenderAsync(socket);
 
-            Log("responded to: ", request.RequestLine.RequestTarget);
+            Log($"[connection #{connectionNumber}] responded to: ", request.RequestLine.RequestTarget);
+
         }
     }
 
@@ -105,6 +112,19 @@ class Program
         response.Content = content;
         response.Headers["Content-Length"] = content.Length.ToString();
         response.Headers["Content-Encoding"] = "gzip";
+    }
+
+    static bool ProcessConnection(Request request, Response response)
+    {
+        var connection = request.GetFieldLineValue("Connection");
+        var closeConnection = connection?.Equals("close", StringComparison.OrdinalIgnoreCase) ?? false;
+
+        if (closeConnection)
+        {
+            response.Headers["Connection"] = "close";
+        }
+
+        return closeConnection;
     }
 
     static Response? RequestDefault(Request request)
